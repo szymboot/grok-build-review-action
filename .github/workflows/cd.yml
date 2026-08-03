@@ -1,0 +1,53 @@
+name: CD
+
+on:
+    workflow_run:
+        workflows: [CI]
+        types: [completed]
+        branches: [main]
+
+permissions:
+    contents: read
+
+jobs:
+    release:
+        if: github.event.workflow_run.conclusion == 'success'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ github.event.workflow_run.head_sha }}
+                  fetch-depth: 0
+
+            - name: Determine version
+              id: version
+              uses: paulhatch/semantic-version@v5.4.0
+              with:
+                  tag_prefix: v
+
+            - name: Skip if release tag already exists
+              id: tag_exists
+              run: |
+                  if git rev-parse "${{ steps.version.outputs.version_tag }}"^{commit} >/dev/null 2>&1; then
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "skip=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Create GitHub release
+              if: steps.tag_exists.outputs.skip != 'true'
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ steps.version.outputs.version_tag }}
+                  name: ${{ steps.version.outputs.version_tag }}
+                  generate_release_notes: true
+
+            - name: Update v1 major tag
+              if: steps.tag_exists.outputs.skip != 'true' && steps.version.outputs.major == '1'
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git tag -fa v1 -m "v1 - release track for 1.x versions"
+                  git push origin v1 --force
