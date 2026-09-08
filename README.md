@@ -1,105 +1,45 @@
-# <picture><source media="(prefers-color-scheme: dark)" srcset="assets/grok-dark.png"><img src="assets/grok-light.png" width="32" height="32" align="center" alt="Grok"></picture> grok-build-review-action
+# Grok Build PR Review — lifecycle extension
 
-PR reviews from your **Grok Build (SuperGrok) subscription**. No `XAI_API_KEY`, no extra bill.
+Local implementation of App-authored, subscription-backed PR reviews for `szymboot`. **Not yet published or GitHub acceptance-tested:** upstream licensing clearance and deployment remain pending. See [configuration, licensing and limitations](docs/lifecycle.md) and [verification results](docs/verification.md).
 
-Installs the [grok CLI](https://x.ai/cli), logs in with your session, reviews the diff, then:
+The composite action now:
 
-- drops an **inline comment on every finding** (bug / warning / nit), validated against the diff
-- keeps one live status comment updated in place, no PR spam
-- tells you to ship it when the code is clean
-- optionally fails the check (`fail_on: bugs`)
+- Rechecks every open finding owned by the configured GitHub App, including outdated threads.
+- Requires explicit fix evidence from current source before resolving a thread.
+- Preserves discussion and tracks existing findings by stable IDs.
+- Creates ordinary PR comments for off-diff findings and updates their Open/Resolved status.
+- Submits APPROVE only after complete successful analysis of the current SHA with no open findings; confirmed blockers receive REQUEST_CHANGES, suggestions/uncertainty receive COMMENT.
+- Rejects malformed, partial, failed and stale analyses instead of treating them as clean.
+- Runs `grok-4.6` with `medium` effort in a source-only Docker environment without GitHub/App credentials; authentication uses the existing shared Grok Build subscription session, with no paid API fallback.
 
-## Quick start
+## Configuration
 
-1. On a machine where `grok login` works: `cat ~/.grok/auth.json | pbcopy`
-2. Save it as a repo secret named `GROK_AUTH_JSON`
-3. Add `.github/workflows/grok-pr-review.yml`:
+Use Linux with Docker and checkout the event head SHA with `persist-credentials: false`. Generate an installation token with the existing release App secrets using `actions/create-github-app-token`. Retain release permissions on the installation, but request only Contents read and Pull requests write for this token.
 
-```yaml
-name: Grok PR Review
+Required action inputs:
 
-on:
-    pull_request:
-        types: [opened, synchronize, reopened, ready_for_review]
+| Input            | Value                                                       |
+| ---------------- | ----------------------------------------------------------- |
+| `grok_auth_json` | Existing organization `GROK_AUTH_JSON`; preserve visibility |
+| `github_token`   | App installation token                                      |
+| `reviewer_login` | Verified App slug plus `[bot]`                              |
+| `expected_sha`   | `github.event.pull_request.head.sha`                        |
+| `model`          | `grok-4.6` (enforced)                                       |
+| `effort`         | `medium` (enforced)                                         |
 
-permissions:
-    contents: read
-    pull-requests: write
+`pr_number` defaults to the event PR. `max_turns` defaults to 50; `max_diff_kb` to 300. Oversized diffs fail without truncation. `fail_on` defaults to `never`; findings do not fail the workflow unless configured, but infrastructure and validation errors do. `custom_instructions` supplies trusted review preferences. Compatibility inputs `roast_level` and `status_comments` no longer disable professional wording or status visibility.
 
-concurrency:
-    group: grok-review-${{ github.event.pull_request.number }}
-    cancel-in-progress: true
+Outputs are `verdict`, `issue_count`, `bug_count`, `review_url` and `review_event`. On failure `verdict=error`; do not infer approval from a successful CLI exit alone.
 
-jobs:
-    review:
-        if: ${{ !github.event.pull_request.draft }}
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  ref: ${{ github.event.pull_request.head.sha }}
+Keep draft PR events enabled and skip external fork/Dependabot PRs that cannot access subscription/App secrets. Use the existing repository queue and timeout. Do not enable auto-merge or introduce required checks.
 
-            - uses: 0xr3ngar/grok-build-review-action@v1
-              with:
-                  grok_auth_json: ${{ secrets.GROK_AUTH_JSON }}
+## Development
+
+```sh
+bun install --frozen-lockfile
+bun test
+bun run typecheck
+bun run fmt:check
 ```
 
-> **Recommended**: Use `@v1` to get the latest release in the v1 series (including future patch/minor updates).  
-> Use `@v1.0.0` (or any specific tag) if you want to pin exactly.
-
-Open a PR and watch it cook.
-
-## Roast levels
-
-The technical findings are identical at every level. The delivery is not.
-
-| Level          | Vibe                                                                                             |
-| -------------- | ------------------------------------------------------------------------------------------------ |
-| `professional` | No jokes, no feelings, just findings. HR-approved.                                               |
-| `playful`      | The default. Dry wit and light elbow jabs from your funniest coworker.                           |
-| `savage`       | Sarcasm with citations, mild profanity. A rival tech lead reviewing you live on stage.           |
-| `diabolical`   | Maximum brutality. Takes every bug personally and asks if you have ever met an array. Good luck. |
-
-Guardrails at every level: the roast rides on real findings, the code gets mocked and never the author, and an inaccurate roast is the one unforgivable sin.
-
-## Inputs
-
-| Input                 | Default               | Description                                                                 |
-| --------------------- | --------------------- | --------------------------------------------------------------------------- |
-| `grok_auth_json`      | _(required)_          | Contents of `~/.grok/auth.json`.                                            |
-| `github_token`        | `${{ github.token }}` | Default token posts as `github-actions[bot]`. Pass a PAT for your own name. |
-| `pr_number`           | event PR              | Review a specific PR (for `workflow_dispatch`).                             |
-| `model`               | CLI default           | e.g. `grok-build`.                                                          |
-| `effort`              | CLI default           | `low` to `max`.                                                             |
-| `max_turns`           | `50`                  | Max agentic turns.                                                          |
-| `fail_on`             | `never`               | `never` \| `bugs` \| `any`.                                                 |
-| `roast_level`         | `playful`             | See above.                                                                  |
-| `custom_instructions` | _(empty)_             | Extra review rules, injected into the prompt.                               |
-| `status_comments`     | `true`                | Live status comment on/off.                                                 |
-| `max_diff_kb`         | `300`                 | Diff size in the prompt before truncation.                                  |
-
-## Outputs
-
-| Output        | Description                                  |
-| ------------- | -------------------------------------------- |
-| `verdict`     | `clean` \| `issues` \| `error`               |
-| `issue_count` | Total findings.                              |
-| `bug_count`   | Bug-severity findings.                       |
-| `review_url`  | URL of the posted review (empty when clean). |
-
-## Steering the review
-
-- `custom_instructions`: inline rules in the workflow ("we use Effect-TS, skip try/catch suggestions").
-- `AGENTS.md` / `CLAUDE.md` at the repo root are picked up automatically, so the reviewer follows the same conventions as your coding agents.
-
-## Security
-
-- `auth.json` is a refreshable credential for your xAI account. Rotate it like you mean it.
-- It is wiped from the runner in an `always()` cleanup step.
-- Grok runs with read-only tools, no shell, and never sees your GitHub token.
-- Fork PRs do not get secrets on plain `pull_request`, so the action simply skips them. Do not use `pull_request_target`.
-
-## Troubleshooting
-
-- **CLI exits with no output**: session expired. `grok login` again, update the secret.
-- **Findings in the review body instead of inline**: grok pointed at lines outside the diff. They get promoted, not dropped.
+`integration/prepare-discord-workflow.py` prepares the `ci/DSC-701` workflow update only after a real fork commit exists. It verifies that SHA on GitHub before writing the pinned workflow. Publication, applying that update, and live subscription/App acceptance runs remain pending.
