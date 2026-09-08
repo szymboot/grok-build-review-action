@@ -48,3 +48,20 @@ Additional local checks:
 Obtain upstream distribution permission; publish a reviewed ticket-branch commit; generate the exact-SHA discord-bot update; validate the real App token; run all lifecycle scenarios above on a disposable PR with the App and shared subscription. Record each head SHA, run URL, review author/state, thread/comment ID and final status. In particular verify success-envelope compatibility, discussion resolution, GitHub superseding REQUEST_CHANGES with APPROVE, stale-review dismissal rights, and two separate runner executions. Keep release automation, organization-secret visibility, optional checks and auto-merge settings unchanged.
 
 See [configuration and residual limitations](lifecycle.md), including semantic evidence/deduplication dependence on the model and GitHub's lack of atomic SHA-conditional thread mutation.
+
+## First live probe and auth ownership regression
+
+The [first lifecycle run](https://github.com/szymboot/discord-bot/actions/runs/34291317713/job/102278259887) used action `a48d935193eb320d98ecbbfe2912ee9f1a99b58f` on PR head `87624e813acc3547fd84441226732dccfd2edfae`. App token creation, context collection and the Docker build succeeded. The CLI stage returned almost immediately and result validation failed. No approval was issued. The original generic error and cleanup discarded the raw CLI failure, so the exact live message cannot be recovered from this run.
+
+A local Linux Docker reproduction with runner-owned (UID 1001) auth directory/file modes 700/600 fails with `Failed to load config: Permission denied (os error 13)`. Container root has no DAC_OVERRIDE capability and cannot read those files. The original empty-root-owned-home smoke test did not exercise this ownership boundary.
+
+The fix assigns the ephemeral auth directory and file to container UID/GID 0 before starting Grok. It preserves 700/600 modes and `--cap-drop ALL`. Fixed-label diagnostics now report the failure phase, CLI exit code and category without printing raw stdout, stderr, API errors or credentials.
+
+Regression validation: 31 Bun tests pass. `permissions-smoke.sh` creates only synthetic `{}` auth inside Linux images: runner-owned auth reproduces EACCES; the same file with corrected ownership reaches the expected Not signed in failure, with no network or secrets. Run it after building the action image:
+
+```sh
+docker build --platform linux/amd64 -t grok-review-local:dsc-701 scripts/lifecycle
+bash scripts/lifecycle/permissions-smoke.sh grok-review-local:dsc-701
+```
+
+The live image installed Grok 1.0.24, while the original local image installed 1.0.13. A new run using the corrected action SHA is required to confirm live session authentication and detect any additional CLI compatibility issue. Re-running the old workflow revision alone retains the old action SHA and cannot apply this fix.

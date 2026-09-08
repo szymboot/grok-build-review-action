@@ -126,6 +126,8 @@ runs:
               printf '%s' "$GROK_AUTH_JSON" > "$WORK/auth/auth.json"
               chmod 600 "$WORK/auth/auth.json"
               jq -e 'type == "object"' "$WORK/auth/auth.json" >/dev/null
+              # Container root has no DAC_OVERRIDE capability; it must own the 700/600 auth files.
+              sudo chown 0:0 "$WORK/auth" "$WORK/auth/auth.json"
               unset GROK_AUTH_JSON CUSTOM_INSTRUCTIONS
               set +e
               # Only source, prompt and the subscription session enter the container.

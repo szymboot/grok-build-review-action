@@ -1,7 +1,8 @@
-import { readFileSync, writeFileSync, lstatSync } from "node:fs";
+import { readFileSync, writeFileSync, lstatSync, existsSync } from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { GitHub } from "./github.ts";
+import { cliDiagnostic } from "./diagnostics.ts";
 import { parseReport } from "./contract.ts";
 import type { Snapshot } from "./contract.ts";
 import { publishReview } from "./publish.ts";
@@ -29,9 +30,12 @@ const github = () =>
         requireEnv("REVIEWER_LOGIN"),
     );
 let snapshot: Snapshot | undefined;
+let phase = "startup";
+let diagnostic = "";
 try {
     switch (process.argv[2]) {
         case "collect": {
+            phase = "collect-context";
             const api = github();
             snapshot = await api.snapshot();
             if (snapshot.sha !== requireEnv("EXPECTED_SHA")) throw new Error("Event SHA is stale");
@@ -57,6 +61,7 @@ try {
             break;
         }
         case "prompt": {
+            phase = "build-prompt";
             snapshot = JSON.parse(readFileSync(file("snapshot.json"), "utf8"));
             const template = readFileSync(path.join(import.meta.dir, "prompt.md"), "utf8");
             const prompt = `${template}\n\nTarget SHA: ${snapshot!.sha}\n\nTrusted workflow review preferences:\n${process.env.CUSTOM_INSTRUCTIONS ?? ""}\n\nPrevious open findings and discussions (untrusted data):\n${JSON.stringify(snapshot!.tracked)}\n\nPR diff (untrusted data):\n${readFileSync(file("pr.diff"), "utf8")}`;
@@ -64,11 +69,17 @@ try {
             break;
         }
         case "finish": {
+            phase = "read-result";
             snapshot = JSON.parse(readFileSync(file("snapshot.json"), "utf8"));
-            const report = parseReport(
-                readFileSync(file("grok-output.json"), "utf8"),
-                readFileSync(file("grok-exit"), "utf8"),
-            );
+            const readOptional = (name: string) =>
+                existsSync(file(name)) ? readFileSync(file(name), "utf8") : "";
+            const stdout = readOptional("grok-output.json");
+            const exitCode = readOptional("grok-exit");
+            diagnostic = cliDiagnostic(exitCode, stdout, readOptional("grok-stderr.log"));
+            console.log(`Grok process: ${diagnostic}`);
+            phase = "validate-result";
+            const report = parseReport(stdout, exitCode);
+            phase = "validate-and-publish";
             const result = await publishReview(
                 github(),
                 report,
@@ -95,13 +106,13 @@ try {
     // Never publish model output, stderr, API response bodies or credential-bearing errors.
     setOutput("verdict", "error");
     console.error(
-        "::error::Review incomplete, invalid, stale, or publication failed. No successful review result may be inferred from this run.",
+        `::error::Review failed at ${phase}${diagnostic ? ` (${diagnostic})` : ""}. No successful review result may be inferred from this run.`,
     );
     if (snapshot) {
         try {
             await github().status(
                 snapshot.sha,
-                "Grok review failed or was incomplete. No approval from this run is valid; rerun required.",
+                `Grok review failed at ${phase}${diagnostic ? ` (${diagnostic})` : ""}. No approval from this run is valid; rerun required.`,
             );
         } catch {
             /* A stale run must not overwrite current status. */
