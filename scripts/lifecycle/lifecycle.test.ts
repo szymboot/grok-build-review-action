@@ -40,7 +40,7 @@ const fixed: Report["assessments"][number] = {
 const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
 const envelope = (value: unknown) =>
     JSON.stringify({
-        type: "result",
+        stopReason: "end_turn",
         text: `<<<GROK_REVIEW>>>\n${JSON.stringify(value)}\n<<<END_GROK_REVIEW>>>`,
     });
 function fake(state: Snapshot) {
@@ -77,7 +77,10 @@ describe("fail-closed result validation", () => {
             "invalid",
             JSON.stringify({ type: "error", message: "limit" }),
             JSON.stringify({ type: "result", is_error: true, text: "ignored" }),
-            JSON.stringify({ type: "result", text: JSON.parse(envelope(report())).text.repeat(2) }),
+            JSON.stringify({
+                stopReason: "end_turn",
+                text: JSON.parse(envelope(report())).text.repeat(2),
+            }),
         ])
             expect(() => parseReport(value, "0")).toThrow();
     });

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, lstatSync, existsSync } from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { GitHub } from "./github.ts";
-import { cliDiagnostic } from "./diagnostics.ts";
+import { cliDiagnostic, validationDiagnostic } from "./diagnostics.ts";
 import { parseReport } from "./contract.ts";
 import type { Snapshot } from "./contract.ts";
 import { publishReview } from "./publish.ts";
@@ -102,7 +102,8 @@ try {
         default:
             throw new Error("Unknown lifecycle command");
     }
-} catch {
+} catch (error) {
+    diagnostic = [diagnostic, validationDiagnostic(error)].filter(Boolean).join("; ");
     // Never publish model output, stderr, API response bodies or credential-bearing errors.
     setOutput("verdict", "error");
     console.error(

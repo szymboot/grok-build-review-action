@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReviewValidationError, schemaDiagnostic } from "./diagnostics.ts";
 
 const text = z.string().trim().min(1).max(12000);
 const file = text.refine(
@@ -56,20 +57,55 @@ export type Tracked = {
 export type Snapshot = { sha: string; login: string; tracked: Tracked[] };
 
 export function parseReport(output: string, exitCode: string): Report {
-    if (exitCode.trim() !== "0") throw new Error("Grok process did not succeed");
-    const envelope = JSON.parse(output);
+    if (exitCode.trim() !== "0") throw new ReviewValidationError("cli-exit");
+    let envelope: unknown;
+    try {
+        envelope = JSON.parse(output);
+    } catch {
+        throw new ReviewValidationError("envelope-json");
+    }
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope))
+        throw new ReviewValidationError("envelope-shape");
+    const value = envelope as Record<string, unknown>;
+    // Native JSON output has text + stopReason, not a mandatory type:"result" discriminator.
+    // Source: xai-org/grok-build, headless.rs, HeadlessEmitter::build_json_result.
     if (
-        envelope.type !== "result" ||
-        typeof envelope.text !== "string" ||
-        envelope.is_error === true
-    ) {
-        throw new Error("Grok did not return a successful result envelope");
+        (value.type !== undefined && value.type !== "result") ||
+        (value.is_error !== undefined && value.is_error !== false)
+    )
+        throw new ReviewValidationError("envelope-error");
+    if (typeof value.text !== "string") throw new ReviewValidationError("envelope-text");
+    if (value.stopReason !== "end_turn") {
+        const reasons = ["max_tokens", "max_turn_requests", "refusal", "cancelled"];
+        const reason =
+            typeof value.stopReason === "string" && reasons.includes(value.stopReason)
+                ? value.stopReason
+                : value.stopReason === undefined
+                  ? "missing"
+                  : "unknown";
+        throw new ReviewValidationError("stop-reason", `stop_reason=${reason}`);
     }
     const matches = [
-        ...envelope.text.matchAll(/<<<GROK_REVIEW>>>\s*([\s\S]*?)\s*<<<END_GROK_REVIEW>>>/g),
+        ...value.text.matchAll(/<<<GROK_REVIEW>>>\s*([\s\S]*?)\s*<<<END_GROK_REVIEW>>>/g),
     ];
-    if (matches.length !== 1) throw new Error("Expected exactly one review block");
-    return ReportSchema.parse(JSON.parse(matches[0]![1]!));
+    if (matches.length !== 1)
+        throw new ReviewValidationError(
+            "review-block-count",
+            `blocks=${Math.min(matches.length, 2)}`,
+        );
+    let json: unknown;
+    try {
+        json = JSON.parse(matches[0]![1]!);
+    } catch {
+        throw new ReviewValidationError("review-json");
+    }
+    const result = ReportSchema.safeParse(json);
+    if (!result.success)
+        throw new ReviewValidationError(
+            "review-schema",
+            `schema=${schemaDiagnostic(result.error.issues)}`,
+        );
+    return result.data;
 }
 
 export function planReview(
@@ -77,22 +113,23 @@ export function planReview(
     snapshot: Snapshot,
     readSource: (file: string) => string,
 ) {
-    if (!report.complete || report.head_sha !== snapshot.sha)
-        throw new Error("Incomplete or mismatched analysis");
+    if (!report.complete) throw new ReviewValidationError("analysis-incomplete");
+    if (report.head_sha !== snapshot.sha) throw new ReviewValidationError("sha-mismatch");
     const previous = new Map(snapshot.tracked.map((item) => [item.finding.id, item]));
-    if (previous.size !== snapshot.tracked.length) throw new Error("Duplicate stored finding IDs");
+    if (previous.size !== snapshot.tracked.length)
+        throw new ReviewValidationError("stored-duplicates");
     const assessments = new Map(report.assessments.map((item) => [item.id, item]));
     if (
         assessments.size !== report.assessments.length ||
         assessments.size !== previous.size ||
         [...previous.keys()].some((id) => !assessments.has(id))
     ) {
-        throw new Error("Every open finding must be assessed exactly once");
+        throw new ReviewValidationError("assessment-coverage");
     }
     const ids = new Set<string>();
     for (const finding of report.findings) {
         if (ids.has(finding.id) || previous.has(finding.id))
-            throw new Error("Duplicate finding: use an assessment for existing issues");
+            throw new ReviewValidationError("finding-duplicate");
         ids.add(finding.id);
     }
     const fixed: Tracked[] = [];
@@ -102,9 +139,15 @@ export function planReview(
         const assessment = assessments.get(id)!;
         if (assessment.status === "fixed") {
             if (!assessment.evidence.length)
-                throw new Error("A fix needs evidence from current source");
+                throw new ReviewValidationError("fix-evidence-missing");
             for (const evidence of assessment.evidence) {
-                const lines = readSource(evidence.file).split("\n");
+                let source: string;
+                try {
+                    source = readSource(evidence.file);
+                } catch {
+                    throw new ReviewValidationError("fix-evidence-unavailable");
+                }
+                const lines = source.split("\n");
                 const actual = lines
                     .slice(
                         evidence.line - 1,
@@ -112,7 +155,7 @@ export function planReview(
                     )
                     .join("\n");
                 if (actual !== evidence.excerpt)
-                    throw new Error("Fix evidence does not match current source");
+                    throw new ReviewValidationError("fix-evidence-mismatch");
             }
             fixed.push(item);
         } else {

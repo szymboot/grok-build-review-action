@@ -65,3 +65,11 @@ bash scripts/lifecycle/permissions-smoke.sh grok-review-local:dsc-701
 ```
 
 The live image installed Grok 1.0.24, while the original local image installed 1.0.13. A new run using the corrected action SHA is required to confirm live session authentication and detect any additional CLI compatibility issue. Re-running the old workflow revision alone retains the old action SHA and cannot apply this fix.
+
+## Native JSON result contract
+
+The [next live run](https://github.com/szymboot/discord-bot/actions/runs/34291919587) reached CLI exit 0 but failed at validate-result; the App-authored status worked and no review was submitted. Investigation found that the parser incorrectly required `type: "result"`. The native `--output-format json` emitter returns `text`, `stopReason`, `sessionId` and `requestId`, without that mandatory discriminator ([upstream HeadlessEmitter::build_json_result](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless.rs)).
+
+The parser now accepts the native envelope and requires `stopReason: "end_turn"`. Even with exit 0 and a clean-looking review block, max_tokens, max_turn_requests, refusal, cancelled, missing and unknown stop reasons fail closed. Strict report schema, completeness, SHA, assessment and evidence checks remain mandatory.
+
+Safe diagnostics distinguish outer JSON/shape/error/text, stop reason, block count, inner JSON, report schema, analysis completeness/SHA, assessment coverage and fix evidence failures. Schema diagnostics emit only allowlisted field paths and issue codes, never raw values, unknown keys or exception messages. Validation: 36 Bun tests pass, including native-format fixtures and zero-exit truncation/refusal rejection. The exact discarded payload from the previous run is unavailable; the identified contract mismatch is fixed, but live acceptance still needs another pinned run.

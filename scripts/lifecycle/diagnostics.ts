@@ -15,3 +15,87 @@ export function cliDiagnostic(exitCode: string, stdout: string, stderr: string):
     else if (exit === "0") category = "process-succeeded";
     return `cli_exit=${exit}; cli_category=${category}`;
 }
+
+export type ValidationCode =
+    | "cli-exit"
+    | "envelope-json"
+    | "envelope-shape"
+    | "envelope-error"
+    | "envelope-text"
+    | "stop-reason"
+    | "review-block-count"
+    | "review-json"
+    | "review-schema"
+    | "analysis-incomplete"
+    | "sha-mismatch"
+    | "stored-duplicates"
+    | "assessment-coverage"
+    | "finding-duplicate"
+    | "fix-evidence-missing"
+    | "fix-evidence-unavailable"
+    | "fix-evidence-mismatch";
+
+export class ReviewValidationError extends Error {
+    constructor(
+        readonly code: ValidationCode,
+        readonly detail = "",
+    ) {
+        super(code);
+    }
+}
+
+// Paths and codes are reduced to known schema vocabulary; never print Zod messages/input values.
+export function schemaDiagnostic(issues: { path: PropertyKey[]; code: string }[]): string {
+    const fields = new Set([
+        "version",
+        "head_sha",
+        "complete",
+        "summary",
+        "findings",
+        "assessments",
+        "id",
+        "file",
+        "line",
+        "severity",
+        "blocking",
+        "title",
+        "body",
+        "status",
+        "explanation",
+        "evidence",
+        "excerpt",
+    ]);
+    const codes = new Set([
+        "invalid_type",
+        "invalid_value",
+        "invalid_format",
+        "too_big",
+        "too_small",
+        "unrecognized_keys",
+        "custom",
+        "invalid_union",
+    ]);
+    return issues
+        .slice(0, 5)
+        .map((issue) => {
+            const path =
+                issue.path
+                    .slice(0, 8)
+                    .map((part) =>
+                        typeof part === "number"
+                            ? "[]"
+                            : typeof part === "string" && fields.has(part)
+                              ? part
+                              : "unknown",
+                    )
+                    .join(".") || "root";
+            return `${path}:${codes.has(issue.code) ? issue.code : "invalid"}`;
+        })
+        .join(",");
+}
+
+export function validationDiagnostic(error: unknown): string {
+    return error instanceof ReviewValidationError
+        ? `validation=${error.code}${error.detail ? `; ${error.detail}` : ""}`
+        : "";
+}
