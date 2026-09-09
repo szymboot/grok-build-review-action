@@ -28,7 +28,8 @@ source = source.replace("      - name: Review with Grok 4.6", """      - name: C
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
-          permission-contents: read
+          # GitHub resolveReviewThread also requires Contents write.
+          permission-contents: write
           permission-pull-requests: write
 
       - name: Review with Grok 4.6""")

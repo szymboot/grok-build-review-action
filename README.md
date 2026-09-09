@@ -14,7 +14,7 @@ The composite action now:
 
 ## Configuration
 
-Use Linux with Docker and checkout the event head SHA with `persist-credentials: false`. Generate an installation token with the existing release App secrets using `actions/create-github-app-token`. Retain release permissions on the installation, but request only Contents read and Pull requests write for this token.
+Use Linux with Docker and checkout the event head SHA with `persist-credentials: false`. Generate an installation token with the existing release App secrets using `actions/create-github-app-token`. Request Contents write and Pull requests write on a token scoped to the reviewed repository. GitHub requires Contents write for `resolveReviewThread` ([reported reproduction](https://github.com/github/gh-aw/issues/35726)); Contents read is sufficient for posting comments but not for this lifecycle. The token stays outside the model container. Keep the existing installation/release permissions unchanged.
 
 Required action inputs:
 
