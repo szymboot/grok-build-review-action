@@ -1,3 +1,4 @@
+import { PublicationError, publicationStep } from "./publicationDiagnostics.ts";
 import { planReview } from "./contract.ts";
 import type { Report, Snapshot } from "./contract.ts";
 import type { GitHub } from "./github.ts";
@@ -13,14 +14,12 @@ export async function publishReview(
     readSource: (file: string) => string,
 ) {
     const plan = planReview(report, snapshot, readSource);
-    const current = await github.snapshot();
+    const current = await publicationStep("snapshot-refresh", () => github.snapshot());
     if (JSON.stringify(current) !== JSON.stringify(snapshot))
-        throw new Error("PR history changed during analysis; rerun required");
+        throw new PublicationError("history-changed", "history-check");
     for (const item of plan.fixed)
-        await github.resolve(
-            snapshot.sha,
-            item,
-            plan.assessments.get(item.finding.id)!.explanation,
+        await publicationStep("resolve-finding", () =>
+            github.resolve(snapshot.sha, item, plan.assessments.get(item.finding.id)!.explanation),
         );
     const lines = rightSideLines(diff);
     const comments: { path: string; line: number; side: "RIGHT"; body: string }[] = [];
@@ -32,12 +31,16 @@ export async function publishReview(
                 side: "RIGHT",
                 body: findingBody(finding, snapshot.sha),
             });
-        } else await github.issue(snapshot.sha, finding);
+        } else await publicationStep("create-off-diff", () => github.issue(snapshot.sha, finding));
     }
-    await github.status(
-        snapshot.sha,
-        `Grok analysis completed: **${plan.event}** · ${plan.open.length} open finding(s). Review publication follows.\n\n${report.summary}`,
+    await publicationStep("publish-status", () =>
+        github.status(
+            snapshot.sha,
+            `Grok analysis completed: **${plan.event}** · ${plan.open.length} open finding(s). Review publication follows.\n\n${report.summary}`,
+        ),
     );
-    const url = await github.review(snapshot.sha, plan.event, report.summary, comments);
+    const url = await publicationStep("submit-review", () =>
+        github.review(snapshot.sha, plan.event, report.summary, comments),
+    );
     return { event: plan.event, open: plan.open, url };
 }

@@ -1,3 +1,4 @@
+import { PublicationError, graphqlErrorTypes } from "./publicationDiagnostics.ts";
 import { ghApi } from "../github/ghApi.ts";
 import { findingBody, readFinding, resolvedBody, statusMarker } from "./marker.ts";
 import type { Finding, Snapshot, Tracked } from "./contract.ts";
@@ -13,8 +14,13 @@ export class GitHub {
         path: string,
         body?: unknown,
     ): Promise<T> {
-        const result = await ghApi<T>(method, path, body);
-        if (!result.ok) throw new Error(`GitHub ${method} failed (${result.status})`);
+        let result;
+        try {
+            result = await ghApi<T>(method, path, body);
+        } catch (error) {
+            throw new PublicationError(error instanceof SyntaxError ? "response-json" : "network");
+        }
+        if (!result.ok) throw new PublicationError("http", "github", result.status);
         return result.data;
     }
     async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
@@ -22,7 +28,14 @@ export class GitHub {
             query,
             variables,
         });
-        if (result.errors?.length || !result.data) throw new Error("Incomplete GraphQL response");
+        if (result.errors?.length)
+            throw new PublicationError(
+                "graphql",
+                "github",
+                undefined,
+                graphqlErrorTypes(result.errors),
+            );
+        if (!result.data) throw new PublicationError("graphql-response");
         return result.data;
     }
     async pages<T>(path: string): Promise<T[]> {
@@ -32,7 +45,7 @@ export class GitHub {
             items.push(...next);
             if (next.length < 100) return items;
         }
-        throw new Error("Pagination limit reached; refusing incomplete history");
+        throw new PublicationError("pagination-limit");
     }
     async head() {
         return this.api<{ head: { sha: string }; state: string }>(
@@ -42,8 +55,8 @@ export class GitHub {
     }
     async guard(sha: string) {
         const current = await this.head();
-        if (current.head.sha !== sha || current.state !== "open")
-            throw new Error("Stale SHA or closed pull request");
+        if (current.head.sha !== sha) throw new PublicationError("stale-head");
+        if (current.state !== "open") throw new PublicationError("closed-pr");
     }
     async identity() {
         // Installation tokens can access this endpoint; user tokens must not substitute for the App.
@@ -57,7 +70,7 @@ export class GitHub {
             result.viewer.login.replace(/\[bot\]$/, "") !==
                 this.expectedLogin.replace(/\[bot\]$/, "")
         )
-            throw new Error("Unexpected GitHub App identity");
+            throw new PublicationError("app-identity");
         return this.expectedLogin;
     }
     async invalidatePreviousApprovals(sha: string) {
@@ -101,7 +114,7 @@ export class GitHub {
         };
         type Thread = { id: string; isResolved: boolean; comments: Connection };
         for (let page = 0; ; page++) {
-            if (page >= 100) throw new Error("Thread pagination limit reached");
+            if (page >= 100) throw new PublicationError("pagination-limit");
             const result: {
                 repository: {
                     pullRequest: {
@@ -130,14 +143,11 @@ export class GitHub {
                 )
                     continue;
                 const finding = readFinding(root.body);
-                if (!finding)
-                    throw new Error(
-                        "Untracked App thread requires manual migration before approval",
-                    );
+                if (!finding) throw new PublicationError("untracked-thread");
                 const history = [...thread.comments.nodes];
                 let next = thread.comments.pageInfo;
                 for (let i = 0; next.hasNextPage; i++) {
-                    if (i >= 100) throw new Error("Comment pagination limit reached");
+                    if (i >= 100) throw new PublicationError("pagination-limit");
                     const result: { node: { comments: Connection } } = await this.graphql(
                         `query($id:ID!,$cursor:String!) { node(id:$id) { ... on PullRequestReviewThread { comments(first:100,after:$cursor) { nodes { body author { login __typename } } pageInfo { hasNextPage endCursor } } } } }`,
                         { id: thread.id, cursor: next.endCursor },
@@ -200,20 +210,28 @@ export class GitHub {
                 `query($id:ID!) { node(id:$id) { ... on PullRequestReviewThread { isResolved comments(first:1) { nodes { body author { login __typename } } } } } }`,
                 { id: tracked.target.id },
             );
+            if (!data.node?.comments?.nodes) throw new PublicationError("thread-unavailable");
             const root = data.node.comments.nodes[0];
             if (
-                root?.author.login.replace(/\[bot\]$/, "") !==
+                root?.author?.login.replace(/\[bot\]$/, "") !==
                     this.expectedLogin.replace(/\[bot\]$/, "") ||
                 root.author.__typename !== "Bot" ||
                 readFinding(root.body)?.id !== tracked.finding.id
             )
-                throw new Error("Thread ownership changed");
+                throw new PublicationError("thread-ownership");
             if (data.node.isResolved) return;
             await this.guard(sha);
-            await this.graphql(
+            const resolved = await this.graphql<{
+                resolveReviewThread: { thread: { id: string; isResolved: boolean } };
+            }>(
                 `mutation($id:ID!) { resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } } }`,
                 { id: tracked.target.id },
             );
+            if (
+                resolved.resolveReviewThread?.thread?.id !== tracked.target.id ||
+                resolved.resolveReviewThread.thread.isResolved !== true
+            )
+                throw new PublicationError("resolution-unconfirmed");
         } else {
             const comment = await this.api<{ body: string; user: { login: string; type: string } }>(
                 "GET",
@@ -224,7 +242,7 @@ export class GitHub {
                 comment.user.type !== "Bot" ||
                 readFinding(comment.body)?.id !== tracked.finding.id
             )
-                throw new Error("Comment ownership changed");
+                throw new PublicationError("comment-ownership");
             await this.guard(sha);
             await this.api("PATCH", `/repos/${this.repo}/issues/comments/${tracked.target.id}`, {
                 body: resolvedBody(comment.body, sha, explanation),

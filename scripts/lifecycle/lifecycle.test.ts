@@ -281,7 +281,7 @@ test("adapter refuses foreign threads and issue comments", async () => {
 });
 test("adapter dismisses its review if head races publication", async () => {
     const api = new FixtureGitHub();
-    await expect(api.review(sha, "APPROVE", "clean", [])).rejects.toThrow("Stale");
+    await expect(api.review(sha, "APPROVE", "clean", [])).rejects.toThrow("stale-head");
     expect(api.writes.map((w) => w.method)).toEqual(["POST", "PUT"]);
     expect((api.writes[0]!.body as { commit_id: string }).commit_id).toBe(sha);
 });
