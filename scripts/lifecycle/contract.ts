@@ -2,6 +2,12 @@ import { z } from "zod";
 import { ReviewValidationError, schemaDiagnostic } from "./diagnostics.ts";
 
 const text = z.string().trim().min(1).max(12000);
+// Validate nonblank evidence without transforming source-significant whitespace.
+const excerpt = z
+    .string()
+    .min(1)
+    .max(12000)
+    .refine((value) => value.trim().length > 0);
 const file = text.refine(
     (p) => !p.startsWith("/") && !p.split("/").some((s) => s === ".." || s === ".git"),
 );
@@ -37,7 +43,7 @@ export const ReportSchema = z
                                     .object({
                                         file,
                                         line: z.number().int().positive(),
-                                        excerpt: text,
+                                        excerpt,
                                     })
                                     .strict(),
                             )
@@ -148,12 +154,12 @@ export function planReview(
                     throw new ReviewValidationError("fix-evidence-unavailable");
                 }
                 const lines = source.split("\n");
-                const actual = lines
-                    .slice(
-                        evidence.line - 1,
-                        evidence.line - 1 + evidence.excerpt.split("\n").length,
-                    )
-                    .join("\n");
+                const hasFinalNewline = evidence.excerpt.endsWith("\n");
+                const lineCount = evidence.excerpt.split("\n").length - Number(hasFinalNewline);
+                const end = evidence.line - 1 + lineCount;
+                let actual = lines.slice(evidence.line - 1, end).join("\n");
+                // A terminal newline belongs to the last quoted line, not an extra blank line.
+                if (hasFinalNewline && end < lines.length) actual += "\n";
                 if (actual !== evidence.excerpt)
                     throw new ReviewValidationError("fix-evidence-mismatch");
             }
